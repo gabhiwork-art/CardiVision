@@ -1,0 +1,182 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ═══════════════════════════════════════════════════════
+    //  HELPER FUNCTIONS
+    // ═══════════════════════════════════════════════════════
+
+    // Check if the request is from an authenticated user
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if the requesting user owns this document
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Check if the current user is a doctor
+    function isDoctor() {
+      return isAuthenticated()
+        && exists(/databases/$(database)/documents/doctors/$(request.auth.uid));
+    }
+
+    // Check if the current user is a patient
+    function isPatient() {
+      return isAuthenticated()
+        && exists(/databases/$(database)/documents/patients/$(request.auth.uid));
+    }
+
+    // Doctor access via flat authorizedDoctorIds (exact hasAny on objects is unreliable).
+    // Use with resource.data on /patients reads so collection queries do not use get() on the same doc.
+    function doctorHasAccessFromPatientData(patient) {
+      return isDoctor()
+        && patient != null
+        && patient.authorizedDoctorIds is list
+        && patient.authorizedDoctorIds.hasAny([request.auth.uid]);
+    }
+
+    // Nested docs (reports, notes): load parent patient by id.
+    function doctorHasAccess(patientId) {
+      let path = /databases/$(database)/documents/patients/$(patientId);
+      return exists(path)
+        && doctorHasAccessFromPatientData(get(path).data);
+    }
+
+
+    // ═══════════════════════════════════════════════════════
+    //  DOCTORS COLLECTION
+    //  Path: /doctors/{doctorId}
+    // ═══════════════════════════════════════════════════════
+
+    match /doctors/{doctorId} {
+      // Doctors can read their own profile
+      allow read: if isOwner(doctorId);
+
+      // Only the owner can create their profile (during signup)
+      // Must have required fields and role must be 'doctor'
+      allow create: if isOwner(doctorId)
+        && request.resource.data.role == 'doctor'
+        && request.resource.data.keys().hasAll(['name', 'email', 'specialization', 'role', 'createdAt']);
+
+      // Doctors can update their own profile but cannot change role
+      allow update: if isOwner(doctorId)
+        && request.resource.data.role == 'doctor';
+
+      // Doctors cannot delete their profile (admin-only action)
+      allow delete: if false;
+    }
+
+
+    // ═══════════════════════════════════════════════════════
+    //  PATIENTS COLLECTION
+    //  Path: /patients/{patientId}
+    // ═══════════════════════════════════════════════════════
+
+    match /patients/{patientId} {
+      // Patients can read their own profile
+      // Doctors with active access can also read
+      allow read: if isOwner(patientId)
+        || doctorHasAccessFromPatientData(resource.data);
+
+      // Only a doctor can create a patient profile
+      // (the doctor who creates the account becomes the primary)
+      allow create: if isDoctor()
+        && request.resource.data.role == 'patient'
+        && request.resource.data.keys().hasAll([
+             'name', 'email', 'patientId', 'primaryDoctorId',
+             'authorizedDoctors', 'authorizedDoctorIds', 'role', 'firstLogin', 'createdAt'
+           ]);
+
+      // Patient can update their own profile (password reset, toggle doctor access)
+      // But cannot change: role, patientId, primaryDoctorId, createdAt
+      allow update: if isOwner(patientId)
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.patientId == resource.data.patientId
+        && request.resource.data.primaryDoctorId == resource.data.primaryDoctorId
+        && request.resource.data.createdAt == resource.data.createdAt;
+
+      // Doctor with access can update limited fields (e.g., adding notes)
+      // But cannot change patient's personal info or auth-related fields
+      allow update: if doctorHasAccessFromPatientData(resource.data)
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.patientId == resource.data.patientId
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.name == resource.data.name
+        && request.resource.data.authorizedDoctors == resource.data.authorizedDoctors;
+
+      // No one can delete patient profiles (admin-only)
+      allow delete: if false;
+    }
+
+
+    // ═══════════════════════════════════════════════════════
+    //  REPORTS COLLECTION (nested under patients)
+    //  Path: /patients/{patientId}/reports/{reportId}
+    // ═══════════════════════════════════════════════════════
+
+    match /patients/{patientId}/reports/{reportId} {
+      // Patient can read their own reports
+      // Doctor with active access can read
+      allow read: if isOwner(patientId)
+        || doctorHasAccess(patientId);
+
+      // Only a doctor with active access can create reports
+      allow create: if doctorHasAccess(patientId)
+        && request.resource.data.keys().hasAll([
+             'condition', 'confidence', 'severity', 'description',
+             'analyzedBy', 'analyzedAt'
+           ])
+        && request.resource.data.analyzedBy == request.auth.uid;
+
+      // Only the analyzing doctor can update a report
+      allow update: if doctorHasAccess(patientId)
+        && resource.data.analyzedBy == request.auth.uid;
+
+      // Reports cannot be deleted
+      allow delete: if false;
+    }
+
+
+    // ═══════════════════════════════════════════════════════
+    //  NOTES SUB-COLLECTION (nested under reports)
+    //  Path: /patients/{patientId}/reports/{reportId}/notes/{noteId}
+    // ═══════════════════════════════════════════════════════
+
+    match /patients/{patientId}/reports/{reportId}/notes/{noteId} {
+      // Shared notes: readable by patient and authorized doctors
+      // Private notes: readable only by the doctor who wrote them
+      allow read: if (isOwner(patientId) && resource.data.visibility == 'shared')
+        || (doctorHasAccess(patientId) && resource.data.visibility == 'shared')
+        || (isDoctor() && resource.data.authorId == request.auth.uid);
+
+      // Only doctors with access can create notes
+      allow create: if doctorHasAccess(patientId)
+        && request.resource.data.authorId == request.auth.uid
+        && request.resource.data.keys().hasAll([
+             'content', 'authorId', 'visibility', 'createdAt'
+           ])
+        && request.resource.data.visibility in ['shared', 'private'];
+
+      // Only the author can update their own notes
+      allow update: if isDoctor()
+        && resource.data.authorId == request.auth.uid
+        && request.resource.data.authorId == resource.data.authorId;
+
+      // Only the author can delete their own notes
+      allow delete: if isDoctor()
+        && resource.data.authorId == request.auth.uid;
+    }
+
+
+    // ═══════════════════════════════════════════════════════
+    //  CATCH-ALL: Deny everything else
+    // ═══════════════════════════════════════════════════════
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
