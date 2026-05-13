@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { AnimatePresence } from 'framer-motion';
 import { useAuth } from './contexts/AuthContext';
+import { Server } from 'lucide-react';
 
 /* ── Existing components (UNTOUCHED) ─────────────────────── */
 import Header from './components/Header';
@@ -63,6 +64,42 @@ function EcgAnalysisPage() {
   const [result, setResult] = useState(null);
   const [phase, setPhase] = useState('idle');
   const [apiError, setApiError] = useState(null);
+  const [serverStatus, setServerStatus] = useState('checking'); // 'checking', 'online', 'waking', 'offline'
+
+  // Ping the ML Server to check if it's awake
+  useEffect(() => {
+    let isMounted = true;
+    
+    const checkHealth = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/health`);
+        if (!isMounted) return;
+        
+        if (res.ok) {
+          setServerStatus('online');
+        } else if (res.status === 503) {
+          setServerStatus('waking');
+        } else {
+          setServerStatus('offline');
+        }
+      } catch (err) {
+        if (isMounted) setServerStatus('offline');
+      }
+    };
+
+    checkHealth();
+    // Re-check every 15 seconds if it's waking up
+    const interval = setInterval(() => {
+      if (serverStatus !== 'online') {
+        checkHealth();
+      }
+    }, 15000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [serverStatus]);
 
   // Get patient context if navigated from doctor dashboard
   const location = useLocation();
@@ -87,6 +124,9 @@ function EcgAnalysisPage() {
         body: formData,
       });
 
+      if (response.status === 503) {
+        throw new Error('The ML Server is currently waking up from sleep. Please wait a few seconds and try again.');
+      }
       if (!response.ok) {
         throw new Error(`Server returned ${response.status}`);
       }
@@ -127,24 +167,52 @@ function EcgAnalysisPage() {
       <div className="relative z-10 flex flex-col min-h-screen">
         <Header />
 
-        {/* Patient context banner */}
-        {patient && (
-          <div className="bg-brand-50 border-b border-brand-100">
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex items-center justify-between">
-              <p className="text-sm text-brand-700">
-                Analyzing ECG for{' '}
-                <strong className="font-semibold">{patient.name}</strong>
-                <span className="font-mono text-brand-500 ml-1.5 text-xs">({patient.patientId})</span>
-              </p>
-              <button
-                onClick={() => navigate('/doctor')}
-                className="text-xs font-semibold text-brand-600 hover:text-brand-800 transition-colors"
-              >
-                ← Back to Dashboard
-              </button>
+        {/* Patient context and Server Status banner */}
+        <div className="bg-brand-50 border-b border-brand-100">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2.5 flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              {patient ? (
+                <p className="text-sm text-brand-700 border-r border-brand-200 pr-4">
+                  Analyzing ECG for{' '}
+                  <strong className="font-semibold">{patient.name}</strong>
+                  <span className="font-mono text-brand-500 ml-1.5 text-xs">({patient.patientId})</span>
+                </p>
+              ) : null}
+              
+              {/* ML Server Status Badge */}
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/60 border border-brand-200 shadow-sm">
+                <Server className={`w-3.5 h-3.5 ${
+                  serverStatus === 'online' ? 'text-success-500' :
+                  serverStatus === 'waking' ? 'text-amber-500 animate-pulse' :
+                  'text-slate-400'
+                }`} />
+                <span className={`text-[10px] font-bold tracking-wider uppercase ${
+                  serverStatus === 'online' ? 'text-success-700' :
+                  serverStatus === 'waking' ? 'text-amber-700' :
+                  'text-slate-500'
+                }`}>
+                  {serverStatus === 'online' ? 'ML Server Online' :
+                   serverStatus === 'waking' ? 'Waking ML Server...' :
+                   serverStatus === 'checking' ? 'Checking ML Server...' :
+                   'ML Server Offline'}
+                </span>
+                {serverStatus === 'online' && (
+                  <span className="relative flex h-2 w-2 ml-0.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-success-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-success-500"></span>
+                  </span>
+                )}
+              </div>
             </div>
+
+            <button
+              onClick={() => navigate('/doctor')}
+              className="text-xs font-semibold text-brand-600 hover:text-brand-800 transition-colors"
+            >
+              ← Back to Dashboard
+            </button>
           </div>
-        )}
+        </div>
 
         <main className="flex-1 flex flex-col items-center justify-center px-4 sm:px-6 lg:px-8 py-12">
           <AnimatePresence mode="wait">

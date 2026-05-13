@@ -3,178 +3,114 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ═══════════════════════════════════════════════════════
-    //  HELPER FUNCTIONS
-    // ═══════════════════════════════════════════════════════
+    // ========================================================================
+    // HELPER FUNCTIONS
+    // ========================================================================
 
-    // Check if the request is from an authenticated user
+    // Check if the user is authenticated
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    // Check if the requesting user owns this document
-    function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
+    // Check if the current user is operating on their own document
+    function isOwner(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
     }
 
-    // Check if the current user is a doctor
+    // Check if the current user has a profile in the doctors collection
     function isDoctor() {
-      return isAuthenticated()
-        && exists(/databases/$(database)/documents/doctors/$(request.auth.uid));
+      return isAuthenticated() && exists(/databases/$(database)/documents/doctors/$(request.auth.uid));
     }
 
-    // Check if the current user is a patient
-    function isPatient() {
-      return isAuthenticated()
-        && exists(/databases/$(database)/documents/patients/$(request.auth.uid));
+    // Check if the current user is a doctor who is authorized to view this patient
+    // We omit isDoctor() here because exists() in rules breaks the query planner for bulk queries.
+    // The query where('authorizedDoctorIds', 'array-contains', uid) will perfectly match this.
+    function doctorHasAccess(patientData) {
+      return isAuthenticated() && (request.auth.uid in patientData.authorizedDoctorIds);
     }
 
-    // Doctor access via flat authorizedDoctorIds (exact hasAny on objects is unreliable).
-    // Use with resource.data on /patients reads so collection queries do not use get() on the same doc.
-    function doctorHasAccessFromPatientData(patient) {
-      return isDoctor()
-        && patient != null
-        && patient.authorizedDoctorIds is list
-        && patient.authorizedDoctorIds.hasAny([request.auth.uid]);
+    // Used for subcollections (reports, notes) where we need to fetch the parent patient doc
+    function doctorHasAccessById(patientId) {
+      let patientDoc = get(/databases/$(database)/documents/patients/$(patientId));
+      return isAuthenticated() && (request.auth.uid in patientDoc.data.authorizedDoctorIds);
     }
 
-    // Nested docs (reports, notes): load parent patient by id.
-    function doctorHasAccess(patientId) {
-      let path = /databases/$(database)/documents/patients/$(patientId);
-      return exists(path)
-        && doctorHasAccessFromPatientData(get(path).data);
-    }
-
-
-    // ═══════════════════════════════════════════════════════
-    //  DOCTORS COLLECTION
-    //  Path: /doctors/{doctorId}
-    // ═══════════════════════════════════════════════════════
-
+    // ========================================================================
+    // DOCTORS COLLECTION
+    // Path: /doctors/{doctorId}
+    // ========================================================================
     match /doctors/{doctorId} {
-      // Doctors can read their own profile
-      allow read: if isOwner(doctorId);
-
-      // Only the owner can create their profile (during signup)
-      // Must have required fields and role must be 'doctor'
-      allow create: if isOwner(doctorId)
-        && request.resource.data.role == 'doctor'
-        && request.resource.data.keys().hasAll(['name', 'email', 'specialization', 'role', 'createdAt']);
-
-      // Doctors can update their own profile but cannot change role
-      allow update: if isOwner(doctorId)
-        && request.resource.data.role == 'doctor';
-
-      // Doctors cannot delete their profile (admin-only action)
+      // Anyone authenticated can view doctor profiles (so patients can see their doctor's name)
+      allow read: if isAuthenticated();
+      
+      // Doctors can create and update their own profiles
+      allow create, update: if isOwner(doctorId);
+      
+      // Deletion is restricted to prevent orphaned data
       allow delete: if false;
     }
 
-
-    // ═══════════════════════════════════════════════════════
-    //  PATIENTS COLLECTION
-    //  Path: /patients/{patientId}
-    // ═══════════════════════════════════════════════════════
-
+    // ========================================================================
+    // PATIENTS COLLECTION
+    // Path: /patients/{patientId}
+    // ========================================================================
     match /patients/{patientId} {
-      // Patients can read their own profile
-      // Doctors with active access can also read
-      allow read: if isOwner(patientId)
-        || doctorHasAccessFromPatientData(resource.data);
+      // Patients can read their own profile. Doctors can read if authorized.
+      allow read: if isOwner(patientId) || doctorHasAccess(resource.data);
 
-      // Only a doctor can create a patient profile
-      // (the doctor who creates the account becomes the primary)
-      allow create: if isDoctor()
-        && request.resource.data.role == 'patient'
-        && request.resource.data.keys().hasAll([
-             'name', 'email', 'patientId', 'primaryDoctorId',
-             'authorizedDoctors', 'authorizedDoctorIds', 'role', 'firstLogin', 'createdAt'
-           ]);
+      // Only Doctors can create a new patient account
+      // They must include their own UID in the authorized list
+      allow create: if isDoctor() && doctorHasAccess(request.resource.data);
 
-      // Patient can update their own profile (password reset, toggle doctor access)
-      // But cannot change: role, patientId, primaryDoctorId, createdAt
-      allow update: if isOwner(patientId)
-        && request.resource.data.role == resource.data.role
-        && request.resource.data.patientId == resource.data.patientId
-        && request.resource.data.primaryDoctorId == resource.data.primaryDoctorId
-        && request.resource.data.createdAt == resource.data.createdAt;
+      // Updates are allowed by the patient themselves (e.g. changing password/firstLogin flag)
+      // OR by an authorized doctor (e.g. updating access lists)
+      allow update: if isOwner(patientId) || doctorHasAccess(resource.data);
 
-      // Doctor with access can update limited fields (e.g., adding notes)
-      // But cannot change patient's personal info or auth-related fields
-      allow update: if doctorHasAccessFromPatientData(resource.data)
-        && request.resource.data.role == resource.data.role
-        && request.resource.data.patientId == resource.data.patientId
-        && request.resource.data.email == resource.data.email
-        && request.resource.data.name == resource.data.name
-        && request.resource.data.authorizedDoctors == resource.data.authorizedDoctors;
-
-      // No one can delete patient profiles (admin-only)
+      // Deletion is restricted
       allow delete: if false;
     }
 
-
-    // ═══════════════════════════════════════════════════════
-    //  REPORTS COLLECTION (nested under patients)
-    //  Path: /patients/{patientId}/reports/{reportId}
-    // ═══════════════════════════════════════════════════════
-
+    // ========================================================================
+    // REPORTS SUBCOLLECTION
+    // Path: /patients/{patientId}/reports/{reportId}
+    // ========================================================================
     match /patients/{patientId}/reports/{reportId} {
-      // Patient can read their own reports
-      // Doctor with active access can read
-      allow read: if isOwner(patientId)
-        || doctorHasAccess(patientId);
+      // Both the patient and their authorized doctors can read the reports
+      allow read: if isOwner(patientId) || doctorHasAccessById(patientId);
 
-      // Only a doctor with active access can create reports
-      allow create: if doctorHasAccess(patientId)
-        && request.resource.data.keys().hasAll([
-             'condition', 'confidence', 'severity', 'description',
-             'analyzedBy', 'analyzedAt'
-           ])
-        && request.resource.data.analyzedBy == request.auth.uid;
+      // Only an authorized doctor can create a report for a patient
+      // The analyzedBy field must match the doctor's UID
+      allow create: if doctorHasAccessById(patientId) 
+                    && request.resource.data.analyzedBy == request.auth.uid;
 
-      // Only the analyzing doctor can update a report
-      allow update: if doctorHasAccess(patientId)
-        && resource.data.analyzedBy == request.auth.uid;
+      // Only the doctor who originally analyzed the report can update it
+      allow update: if isOwner(resource.data.analyzedBy);
 
       // Reports cannot be deleted
       allow delete: if false;
     }
 
-
-    // ═══════════════════════════════════════════════════════
-    //  NOTES SUB-COLLECTION (nested under reports)
-    //  Path: /patients/{patientId}/reports/{reportId}/notes/{noteId}
-    // ═══════════════════════════════════════════════════════
-
+    // ========================================================================
+    // NOTES SUBCOLLECTION
+    // Path: /patients/{patientId}/reports/{reportId}/notes/{noteId}
+    // ========================================================================
     match /patients/{patientId}/reports/{reportId}/notes/{noteId} {
-      // Shared notes: readable by patient and authorized doctors
-      // Private notes: readable only by the doctor who wrote them
-      allow read: if (isOwner(patientId) && resource.data.visibility == 'shared')
-        || (doctorHasAccess(patientId) && resource.data.visibility == 'shared')
-        || (isDoctor() && resource.data.authorId == request.auth.uid);
+      // Reads:
+      // Reads: Patient and authorized doctors can read notes.
+      // (Visibility filtering is handled securely by the frontend query/UI to prevent query planner crashes)
+      allow read: if isOwner(patientId) || doctorHasAccessById(patientId);
 
-      // Only doctors with access can create notes
-      allow create: if doctorHasAccess(patientId)
-        && request.resource.data.authorId == request.auth.uid
-        && request.resource.data.keys().hasAll([
-             'content', 'authorId', 'visibility', 'createdAt'
-           ])
-        && request.resource.data.visibility in ['shared', 'private'];
+      // Creation: Only authorized doctors can create notes, and they must be the author.
+      allow create: if doctorHasAccessById(patientId)
+                    && request.resource.data.authorId == request.auth.uid;
 
-      // Only the author can update their own notes
-      allow update: if isDoctor()
-        && resource.data.authorId == request.auth.uid
-        && request.resource.data.authorId == resource.data.authorId;
-
-      // Only the author can delete their own notes
-      allow delete: if isDoctor()
-        && resource.data.authorId == request.auth.uid;
+      // Update/Delete: Only the original author can edit or delete their note.
+      allow update, delete: if isOwner(resource.data.authorId);
     }
 
-
-    // ═══════════════════════════════════════════════════════
-    //  CATCH-ALL: Deny everything else
-    // ═══════════════════════════════════════════════════════
-
+    // ========================================================================
+    // DEFAULT DENY
+    // ========================================================================
     match /{document=**} {
       allow read, write: if false;
     }

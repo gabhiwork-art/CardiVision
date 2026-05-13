@@ -14,11 +14,11 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
 
   // Patient form
-  const [patientId, setPatientId]         = useState('');
+  const [patientEmail, setPatientEmail]         = useState('');
   const [patientPassword, setPatientPassword] = useState('');
 
   const [isLoading, setIsLoading] = useState(false);
-  const { login, loginWithPatientId } = useAuth();
+  const { login } = useAuth();
 
   const handleDoctorLogin = async (e) => {
     e.preventDefault();
@@ -44,16 +44,16 @@ export default function LoginPage() {
 
   const handlePatientLogin = async (e) => {
     e.preventDefault();
-    if (!patientId || !patientPassword) return toast.error('Please fill in all fields');
+    if (!patientEmail || !patientPassword) return toast.error('Please fill in all fields');
 
     setIsLoading(true);
     try {
-      await loginWithPatientId(patientId.trim().toUpperCase(), patientPassword);
+      await login(patientEmail.trim(), patientPassword);
       toast.success('Logged in successfully!');
     } catch (err) {
       const msg =
-        err.code === 'auth/patient-not-found'  ? 'No patient found with this ID' :
-        err.code === 'auth/invalid-credential'  ? 'Incorrect Patient ID or password' :
+        err.code === 'auth/user-not-found'  ? 'No patient found with this email' :
+        err.code === 'auth/invalid-credential'  ? 'Incorrect email or password' :
         'Login failed. Please try again.';
       toast.error(msg);
     } finally {
@@ -201,18 +201,18 @@ export default function LoginPage() {
                   className="space-y-5"
                 >
                   <div>
-                    <label htmlFor="patient-id-login" className="block text-sm font-medium text-slate-700 mb-1.5">
-                      Patient ID
+                    <label htmlFor="patient-email-login" className="block text-sm font-medium text-slate-700 mb-1.5">
+                      Email Address
                     </label>
                     <div className="relative">
-                      <IdCard className="absolute left-3 top-1/2 -translate-y-1/2 w-4.5 h-4.5 text-slate-400" />
+                      <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4.5 h-4.5 text-slate-400" />
                       <input
-                        id="patient-id-login"
-                        type="text"
-                        value={patientId}
-                        onChange={(e) => setPatientId(e.target.value)}
-                        placeholder="PAT-2026-XXXXX"
-                        className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-300 bg-slate-50/50 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-400 transition-all font-mono tracking-wide uppercase"
+                        id="patient-email-login"
+                        type="email"
+                        value={patientEmail}
+                        onChange={(e) => setPatientEmail(e.target.value)}
+                        placeholder="patient@example.com"
+                        className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-300 bg-slate-50/50 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-400 transition-all"
                       />
                     </div>
                   </div>
@@ -253,7 +253,7 @@ export default function LoginPage() {
                   <div className="bg-slate-50 rounded-xl p-3 flex items-start gap-2">
                     <IdCard className="w-4 h-4 text-slate-400 mt-0.5 shrink-0" />
                     <p className="text-xs text-slate-500 leading-relaxed">
-                      Your Patient ID and temporary password were provided by your doctor.
+                      Your registered email and temporary password were provided by your doctor.
                       You'll be asked to set a new password on first login.
                     </p>
                   </div>

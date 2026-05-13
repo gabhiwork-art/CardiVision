@@ -20,7 +20,7 @@ import {
   serverTimestamp,
   orderBy,
 } from 'firebase/firestore';
-import { auth, db, secondaryAuth } from '../firebase/config';
+import { auth, db, firebaseConfig } from '../firebase/config';
 
 const AuthContext = createContext(null);
 
@@ -95,39 +95,7 @@ export function AuthProvider({ children }) {
     return { uid: credential.user.uid, email: credential.user.email };
   }, []);
 
-  /* ── Patient Login (by PAT-YYYY-XXXXX ID) ──────────────── */
-  // Patients are stored in Firestore with a patientId field.
-  // We look up the patient's real Firebase Auth email via a Firestore query,
-  // then sign in with that email + password.
-  const loginWithPatientId = useCallback(async (patientIdInput, password) => {
-    // Query the patients collection for a document matching this patientId
-    const q = query(
-      collection(db, 'patients'),
-      where('patientId', '==', patientIdInput)
-    );
-    const snap = await getDocs(q);
-
-    if (snap.empty) {
-      const err = new Error('Invalid Patient ID or password');
-      err.code = 'auth/invalid-credential';
-      throw err;
-    }
-
-    // Get the Firebase Auth email stored on the patient doc
-    const patientDoc = snap.docs[0];
-    const patientEmail = patientDoc.data().email;
-
-    if (!patientEmail) {
-      const err = new Error('Patient account not properly configured');
-      err.code = 'auth/user-not-found';
-      throw err;
-    }
-
-    // Now sign in with the real Firebase Auth email + password
-    const credential = await signInWithEmailAndPassword(auth, patientEmail, password);
-    return { uid: credential.user.uid, email: credential.user.email };
-  }, []);
-
+  // Deprecated: Patients now login directly with Email + Password
   /* ── Logout ────────────────────────────────────────────── */
   const logout = useCallback(async () => {
     await signOut(auth);
@@ -175,17 +143,39 @@ export function AuthProvider({ children }) {
   }, []);
 
   /* ── Create patient account (used by doctor) ────────────
-     Uses a SECONDARY Firebase Auth instance so the doctor's
-     session is never disrupted. The patient account is created
-     in Firebase Auth and their profile is written to Firestore.
+     Uses the Firebase REST API to create a new user without
+     modifying the current user session.
   ─────────────────────────────────────────────────────────── */
   const createPatientAccount = useCallback(async ({ email, password, profile }) => {
-    let credential = null;
     try {
-      console.log('[createPatientAccount] Creating Auth user (secondary)...', { email });
-      credential = await createUserWithEmailAndPassword(secondaryAuth, email, password);
-      const uid = credential.user.uid;
-      console.log('[createPatientAccount] Auth user created:', uid);
+      console.log('[createPatientAccount] Creating Auth user via REST API...', { email });
+      
+      const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${firebaseConfig.apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          password,
+          returnSecureToken: true
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        const apiError = errorData.error?.message || 'UNKNOWN_ERROR';
+        console.error('[createPatientAccount] REST API Error:', apiError);
+        
+        const err = new Error(apiError);
+        if (apiError === 'EMAIL_EXISTS') err.code = 'auth/email-already-in-use';
+        else if (apiError === 'WEAK_PASSWORD') err.code = 'auth/weak-password';
+        else if (apiError === 'OPERATION_NOT_ALLOWED') err.code = 'auth/operation-not-allowed';
+        else err.code = 'auth/unknown';
+        throw err;
+      }
+
+      const data = await response.json();
+      const uid = data.localId;
+      console.log('[createPatientAccount] Auth user created successfully:', uid);
 
       console.log('[createPatientAccount] Writing Firestore patient doc...', { uid });
       await setDoc(doc(db, 'patients', uid), {
@@ -198,23 +188,7 @@ export function AuthProvider({ children }) {
       return uid;
     } catch (err) {
       console.error('[createPatientAccount] Failed:', err?.code, err?.message, err);
-      if (credential?.user) {
-        try {
-          console.warn('[createPatientAccount] Rolling back orphaned Auth user...');
-          await deleteUser(credential.user);
-          console.warn('[createPatientAccount] Auth rollback OK');
-        } catch (rollbackErr) {
-          console.error('[createPatientAccount] Auth rollback failed:', rollbackErr);
-        }
-      }
       throw err;
-    } finally {
-      try {
-        await signOut(secondaryAuth);
-        console.log('[createPatientAccount] Secondary auth signed out');
-      } catch (signOutErr) {
-        console.warn('[createPatientAccount] Secondary signOut (ignored):', signOutErr?.message);
-      }
     }
   }, []);
 
@@ -407,7 +381,6 @@ export function AuthProvider({ children }) {
     loading,
     doctorSignup,
     login,
-    loginWithPatientId,
     logout,
     updateUserProfile,
     getUserProfile,

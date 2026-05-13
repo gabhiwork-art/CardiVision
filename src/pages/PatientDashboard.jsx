@@ -16,12 +16,17 @@ export default function PatientDashboard() {
   useEffect(() => {
     if (currentUser?.uid) {
       (async () => {
-        const [docs, reps] = await Promise.all([
-          getDoctorsForPatient(currentUser.uid),
-          getReportsForPatient(currentUser.uid),
-        ]);
-        setDoctors(docs);
-        setReports(reps);
+        try {
+          const [docs, reps] = await Promise.all([
+            getDoctorsForPatient(currentUser.uid),
+            getReportsForPatient(currentUser.uid),
+          ]);
+          setDoctors(docs);
+          setReports(reps);
+        } catch (error) {
+          console.error("Dashboard Load Error:", error);
+          toast.error("Failed to load dashboard data: " + error.message);
+        }
       })();
     }
   }, [currentUser, getDoctorsForPatient, getReportsForPatient]);
