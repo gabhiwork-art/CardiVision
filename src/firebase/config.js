@@ -9,8 +9,9 @@ import { getFirestore }  from 'firebase/firestore';
 
 // TODO: Replace these placeholder values with your real Firebase project config.
 // Find them at: https://console.firebase.google.com → Project Settings → Your Apps
+
 export const firebaseConfig = {
-  apiKey: "AIzaSyD9JHbkwrekuASubTv-r4EQjROIgIsnAT8",
+  apiKey: "",
   authDomain: "cardiovision-a366d.firebaseapp.com",
   projectId: "cardiovision-a366d",
   storageBucket: "cardiovision-a366d.firebasestorage.app",
